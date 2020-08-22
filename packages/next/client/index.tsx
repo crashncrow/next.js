@@ -348,6 +348,11 @@ export async function render(renderingProps: RenderRouteInfo) {
   try {
     await doRender(renderingProps)
   } catch (renderErr) {
+    // bubble up cancelation errors
+    if (renderErr.cancelled) {
+      throw renderErr
+    }
+
     if (process.env.NODE_ENV === 'development') {
       // Ensure this error is displayed in the overlay in development
       setTimeout(() => {
@@ -550,13 +555,13 @@ const wrapApp = (App: AppComponent) => (
   )
 }
 
-async function doRender({
+function doRender({
   App,
   Component,
   props,
   err,
   styleSheets,
-}: RenderRouteInfo) {
+}: RenderRouteInfo): Promise<any> {
   Component = Component || lastAppProps.Component
   props = props || lastAppProps.props
 
@@ -570,6 +575,7 @@ async function doRender({
   lastAppProps = appProps
 
   let resolvePromise: () => void
+  let renderPromiseReject: () => void
   const renderPromise = new Promise((resolve, reject) => {
     if (lastRenderReject) {
       lastRenderReject()
@@ -578,9 +584,12 @@ async function doRender({
       lastRenderReject = null
       resolve()
     }
-    lastRenderReject = () => {
+    renderPromiseReject = lastRenderReject = () => {
       lastRenderReject = null
-      reject()
+
+      const error: any = new Error('Cancel rendering route')
+      error.cancelled = true
+      reject(error)
     }
   })
 
@@ -601,6 +610,13 @@ async function doRender({
       return Promise.resolve([])
     }
 
+    // Clean up previous render if canceling:
+    ;([].slice.call(
+      document.querySelectorAll('link[data-n-staging]')
+    ) as HTMLLinkElement[]).forEach((el) => {
+      el.parentNode!.removeChild(el)
+    })
+
     let referenceNode: HTMLLinkElement | undefined = ([].slice.call(
       document.querySelectorAll('link[data-n-g], link[data-n-p]')
     ) as HTMLLinkElement[]).pop()
@@ -608,7 +624,11 @@ async function doRender({
     const required: Promise<void>[] = styleSheets.map((href) => {
       const [link, promise] = createLink(href, 'stylesheet')
       link.setAttribute('data-n-staging', '')
-      link.setAttribute('media', 'none')
+      // Media `none` does not work in Firefox, so `print` is more
+      // cross-browser. Since this is so short lived we don't have to worry
+      // about style thrashing in a print view (where no routing is going to be
+      // happening anyway).
+      link.setAttribute('media', 'print')
       if (referenceNode) {
         referenceNode.parentNode!.insertBefore(link, referenceNode.nextSibling)
         referenceNode = link
@@ -640,16 +660,6 @@ async function doRender({
     })
   }
 
-  function onAbort() {
-    document.querySelectorAll('link[data-n-staging]').forEach((el) => {
-      el.remove()
-    })
-  }
-  renderPromise.catch((abortError) => {
-    onAbort()
-    throw abortError
-  })
-
   function onCommit() {
     if (
       // We can skip this during hydration. Running it wont cause any harm, but
@@ -660,7 +670,9 @@ async function doRender({
       process.env.NODE_ENV === 'production'
     ) {
       // Remove old stylesheets:
-      document.querySelectorAll('link[data-n-p]').forEach((el) => el.remove())
+      ;([].slice.call(
+        document.querySelectorAll('link[data-n-p]')
+      ) as HTMLLinkElement[]).forEach((el) => el.parentNode!.removeChild(el))
 
       // Activate new stylesheets:
       ;[].slice
@@ -670,6 +682,10 @@ async function doRender({
           el.removeAttribute('media')
           el.setAttribute('data-n-p', '')
         })
+
+      // Force browser to recompute layout, which prevents a flash of unstyled
+      // content:
+      getComputedStyle(document.body, 'height')
     }
 
     resolvePromise()
@@ -684,17 +700,32 @@ async function doRender({
   )
 
   // We catch runtime errors using componentDidCatch which will trigger renderError
-  await onStart()
-  renderReactElement(
-    process.env.__NEXT_STRICT_MODE ? (
-      <React.StrictMode>{elem}</React.StrictMode>
-    ) : (
-      elem
-    ),
-    appElement!
-  )
+  return Promise.race([
+    // Download required CSS assets first:
+    onStart()
+      .then(() => {
+        // Ensure a new render has not been started:
+        if (renderPromiseReject === lastRenderReject) {
+          // Queue rendering:
+          renderReactElement(
+            process.env.__NEXT_STRICT_MODE ? (
+              <React.StrictMode>{elem}</React.StrictMode>
+            ) : (
+              elem
+            ),
+            appElement!
+          )
+        }
+      })
+      .then(
+        () =>
+          // Wait for rendering to complete:
+          renderPromise
+      ),
 
-  await renderPromise
+    // Bail early on route cancelation (rejection):
+    renderPromise,
+  ])
 }
 
 function Root({

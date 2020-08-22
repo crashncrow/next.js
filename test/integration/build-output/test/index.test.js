@@ -118,7 +118,7 @@ describe('Build Output', () => {
       expect(parseFloat(webpackSize) - 752).toBeLessThanOrEqual(0)
       expect(webpackSize.endsWith(' B')).toBe(true)
 
-      expect(parseFloat(mainSize) - 6.9).toBeLessThanOrEqual(0)
+      expect(parseFloat(mainSize) - 7).toBeLessThanOrEqual(0)
       expect(mainSize.endsWith('kB')).toBe(true)
 
       expect(parseFloat(frameworkSize) - 41).toBeLessThanOrEqual(0)
@@ -131,6 +131,46 @@ describe('Build Output', () => {
         /\.txt|\.LICENSE\./
       )
       expect(files).toEqual([])
+    })
+  })
+
+  describe('Crypto Application', () => {
+    let stdout
+    const appDir = join(fixturesDir, 'with-crypto')
+
+    beforeAll(async () => {
+      await remove(join(appDir, '.next'))
+    })
+
+    it('should not include crypto', async () => {
+      ;({ stdout } = await nextBuild(appDir, [], {
+        stdout: true,
+      }))
+
+      console.log(stdout)
+
+      const parsePageSize = (page) =>
+        stdout.match(
+          new RegExp(` ${page} .*?((?:\\d|\\.){1,} (?:\\w{1,})) `)
+        )[1]
+
+      const parsePageFirstLoad = (page) =>
+        stdout.match(
+          new RegExp(
+            ` ${page} .*?(?:(?:\\d|\\.){1,}) .*? ((?:\\d|\\.){1,} (?:\\w{1,}))`
+          )
+        )[1]
+
+      const indexSize = parsePageSize('/')
+      const indexFirstLoad = parsePageFirstLoad('/')
+
+      expect(parseFloat(indexSize)).toBeLessThanOrEqual(3)
+      expect(parseFloat(indexSize)).toBeGreaterThanOrEqual(2)
+      expect(indexSize.endsWith('kB')).toBe(true)
+
+      expect(parseFloat(indexFirstLoad)).toBeLessThanOrEqual(65)
+      expect(parseFloat(indexFirstLoad)).toBeGreaterThanOrEqual(60)
+      expect(indexFirstLoad.endsWith('kB')).toBe(true)
     })
   })
 
